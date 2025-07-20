@@ -176,8 +176,6 @@ def train(model_name: str, file_paths: list[str], load_mode: str = 'excel', loca
             # calculate matrics
             evalutor = early_stopping(current_score=total_loss / train_step)
             if evalutor or early_stopping.save_best_model:
-                if evalutor:
-                    logger.info(f"Early stopping at epoch {epoch + 1}")
                 model_saving_path = os.path.join(local_path, f'model_{epoch + 1}.pth')
                 logger.info(f'Saving model at {model_saving_path}')
                 torch.save({
@@ -195,6 +193,10 @@ def train(model_name: str, file_paths: list[str], load_mode: str = 'excel', loca
                     "target_modules": target_modules,
                     "learning_rate": learning_rate,
                     "weight_decay": weight_decay}, model_saving_path)
+
+                if evalutor:
+                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                    break
 
                 mlflow.log_artifact(log_file)
 
