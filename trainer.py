@@ -8,6 +8,7 @@ from torch.optim import AdamW
 from models import BaseModel, LoraModel
 from utils.load_dataset import LoadDatasetAndSaveDataset
 from utils.create_test_train_dataset import split_dataset
+from utils.early_stopping import EarlyStopping
 from peft import LoraConfig
 from torch.utils.data import DataLoader
 from datasets import CustomDataset
@@ -31,7 +32,9 @@ random.seed(42)
 def train(model_name: str, file_paths: list[str], load_mode: str = 'excel', local_path: str = '', batch_size: int = 1,
           lora_method: bool = False, num_epochs: int = 10, train_ratio: float = 0.8, chunk_size: int = 30,
           lora_rank: int = 7, lora_alpha: int = 16, init_lora_weights: str = 'gaussian', lora_dropout: float = 0.0,
-          target_modules=None, learning_rate: float = 1e-6, weight_decay: float = 0.001, tracking_uri: str = ''):
+          target_modules=None, learning_rate: float = 1e-6, weight_decay: float = 0.001, tracking_uri: str = '',
+          early_stopping_patience: int = 5, early_stopping_min_delta: float = 0.01,
+          early_stopping_mode: str = 'min'):
     if target_modules is None:
         target_modules = ['q_proj', 'v_proj', 'k_proj']
     mlflow.set_tracking_uri(tracking_uri)
@@ -80,12 +83,12 @@ def train(model_name: str, file_paths: list[str], load_mode: str = 'excel', loca
         split_dataset(local_path, train_ratio=0.8, logger=logger)
 
         # initialize the dataset
-        logger.info(f' Create the pytorch dataset')
+        logger.info(f' Creating the pytorch dataset')
         train_dataset = CustomDataset(root_path=local_path, mode='train')
         val_dataset = CustomDataset(root_path=local_path, mode='eval')
 
         # initialize dataloader
-        logger.info(f'create the pytorch dataset loader')
+        logger.info(f'creating the pytorch dataset loader')
         train_loader = DataLoader(train_dataset, batch_size=batch_size)
         val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
@@ -107,9 +110,14 @@ def train(model_name: str, file_paths: list[str], load_mode: str = 'excel', loca
             model = base_model
 
         # initialize the optimizer
-        logger.info(f'Initialize the optimizer')
+        logger.info(f'Initializing the optimizer')
         optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+        # initialize the early stopping
+        logger.info(f'Initializing the early stopping')
+
+        early_stopping = EarlyStopping(patience=early_stopping_patience, min_delta=early_stopping_min_delta,
+                                       mode=early_stopping_mode)
         # add log into artifact (initial information)
         mlflow.log_artifact(log_file)
 
@@ -164,7 +172,31 @@ def train(model_name: str, file_paths: list[str], load_mode: str = 'excel', loca
                 "epoch_val_loss": total_eval_loss / eval_step,
                 'epoch': epoch + 1
             }, step=epoch)
-            model_saving_path = os.path.join(local_path, f'model_{epoch}.pth')
+
+            # calculate matrics
+            evalutor = early_stopping(current_score=total_loss / train_step)
+            if evalutor or early_stopping.save_best_model:
+                if evalutor:
+                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                model_saving_path = os.path.join(local_path, f'model_{epoch + 1}.pth')
+                logger.info(f'Saving model at {model_saving_path}')
+                torch.save({
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "epoch": epoch + 1,
+                    "total_loss": total_loss / train_step,
+                    "total_eval_loss": total_eval_loss / eval_step,
+                    "model_name": model_name,
+                    "lora_method": lora_method,
+                    "lora_rank": lora_rank,
+                    "lora_alpha": lora_alpha,
+                    "init_lora_weights": init_lora_weights,
+                    "lora_dropout": lora_dropout,
+                    "target_modules": target_modules,
+                    "learning_rate": learning_rate,
+                    "weight_decay": weight_decay}, model_saving_path)
+
+                mlflow.log_artifact(log_file)
 
             mlflow.log_artifact(log_file)
 
